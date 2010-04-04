@@ -4,7 +4,7 @@ use strict;
 use warnings;
 
 use constant PORT => 12112;
-use constant FCSH => "$ENV{HOME}/opt/flex/bin/fcsh";
+#use constant FCSH => "$ENV{HOME}/opt/flex/bin/fcsh";
 
 use Any::Moose;
 
@@ -16,7 +16,11 @@ use IO::Socket::INET;
 use JSON; my $json = JSON->new;
 use Cwd qw/cwd/;
 
-has fcsh => qw/ is ro required 1 isa Str init_arg fcsh /;
+has fcsh => qw/ is ro lazy_build 1 isa Str init_arg fcsh /;
+sub _build_fcsh {
+    my $fcsh = $ENV{PFCSH_FCSH} or die "\$ENV{PFCSH_FCSH} is missing";
+    return $fcsh;
+}
 has port => qw/ is ro required 1 isa Int lazy 1 /, default => sub { PORT };
 has pid_file => qw/ is ro lazy_build 1 isa Str /;
 sub _build_pid_file {
@@ -61,7 +65,10 @@ sub _build_connection {
 has daemon => qw/ is ro lazy_build 1 /; 
 sub _build_daemon {
     my $self = shift;
-    return App::pfcsh::Daemon->new( port => $self->port, fcsh => $self->fcsh );
+    my $fcsh = $self->fcsh;
+    die "Given fcsh ($fcsh) does not exist or is unreadable or is unexecutable" unless
+        -e $fcsh && -r _ && -x _;
+    return App::pfcsh::Daemon->new( port => $self->port, fcsh => $fcsh );
 }
 
 sub pid {
@@ -109,7 +116,7 @@ sub talk {
 sub run {
     my $class = shift;
 
-    my $self = $class->new( port => PORT, fcsh => FCSH );
+    my $self = $class->new( port => PORT );
     
     if( my $pid = $self->pid ) {
         print "Server running ($pid)\n";
