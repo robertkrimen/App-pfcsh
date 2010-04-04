@@ -3,7 +3,7 @@ package App::pfcsh::App;
 use strict;
 use warnings;
 
-use constant PORT => 12111;
+use constant PORT => 12112;
 use constant FCSH => "$ENV{HOME}/opt/flex/bin/fcsh";
 
 use Any::Moose;
@@ -13,6 +13,8 @@ use App::pfcsh::Daemon;
 use Daemon::Daemonize qw/ :all /;
 use Path::Class;
 use IO::Socket::INET;
+use JSON; my $json = JSON->new;
+use Cwd qw/cwd/;
 
 has fcsh => qw/ is ro required 1 isa Str init_arg fcsh /;
 has port => qw/ is ro required 1 isa Int lazy 1 /, default => sub { PORT };
@@ -90,14 +92,17 @@ sub try_startup {
 
 sub talk {
     my $self = shift;
-
-    my $command = "@_";
+    my ( $command, @arguments ) = @_;
 
     $self->try_startup;
 
     my $socket = $self->connection or die "Unable to connect";
     $socket->autoflush;
-    $socket->print( "$command\n" );
+    my %request;
+    $request{command} = $command;
+    $request{arguments} = \@arguments;
+    $request{working_directory} = cwd;
+    $socket->print( $json->encode( \%request ) );
     print $_ while <$socket>;
 }
 
@@ -115,29 +120,27 @@ sub run {
 
     return unless @ARGV;
 
-    if ( $ARGV[0] eq 'stop' ) {
+    if ( $ARGV[0] =~ m/^\s*(?:start|quit)$/ ) {
         if( my $pid = $self->pid ) {
             print "Shutdown $pid\n";
             kill 15, $pid;
         }
     }
-    elsif ( $ARGV[0] eq 'start' ) {
+    elsif ( $ARGV[0] =~ m/^\s*(?:stop|quit)$/ ) {
         if ( my $pid = $self->pid ) {
             print "Server already running ($pid)\n";
         }
         else {
-
             $self->try_startup;
-
             $pid = $self->pid;
             print "Server running ($pid)\n";
         }
     }
     elsif ( $ARGV[0] eq 'ping' ) {
-        $self->talk( "ping" );
+        $self->talk( ping => '' );
     }
     else {
-        $self->talk( "@ARGV" );
+        $self->talk( fcsh => @ARGV );
     }
 }
 

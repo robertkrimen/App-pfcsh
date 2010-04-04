@@ -1,41 +1,53 @@
-package App::pfcsh::Daemon;
-
-use strict;
-use warnings;
+package App::pfcsh::Daemon::Session;
 
 use Any::Moose;
-use AnyEvent::Socket;
-use AnyEvent::Util qw/ fh_nonblocking /;
-use IPC::RunSession::Simple;
-use Path::Class;
-use IPC::Open3 qw/open3/;
 
-has fcsh_path => qw/ is ro required 1 isa Str init_arg fcsh /;
-has port => qw/ is ro required 1 isa Int /;
+use Try::Tiny;
+use Cwd qw/cwd/;
 
-has session => qw/ is ro lazy_build 1 clearer close_session predicate has_session /;
-sub _build_session {
+has daemon => qw/ is ro required 1 /, handles => [qw/ log /];
+has working_directory => qw/ is ro required 1 isa Str /;
+has fresh => qw/ is rw isa Bool /, default => 1;
+has _compiles => qw/ is ro isa HashRef required 1 /, default => sub { {} };
+
+has handle => qw/ is ro lazy_build 1 clearer close_handle predicate has_handle /, handles => [qw/ write /];
+sub _build_handle {
     my $self = shift;
-    my $fcsh = $self->fcsh_path;
-    $self->log( "Opening fcsh session via \"$fcsh\"\n" );
-    return IPC::RunSession::Simple->open( $fcsh );
+
+    my $fcsh = $self->daemon->fcsh_path;
+    my $working_directory = $self->working_directory;
+    
+    $self->log( "Opening fcsh session via \"$fcsh\" in \"$working_directory\"\n" );
+
+    my $cwd = cwd;
+    my $handle = try {
+        chdir $working_directory;
+        IPC::RunSession::Simple->open( $fcsh );
+    } finally {
+        chdir $cwd;
+    };
+
+    $self->fresh( 1 );
+
+    return $handle;
 }
 
 sub read_until_prompt {
     my $self = shift;
 
-    my $result = $self->session->read_until( qr/\(fcsh\) /, 30 );
+    $self->fresh( 0 );
 
-    if ( $result->closed )      { $self->log( "Session closed\n" ) }
-    elsif ( $result->expired )  { $self->log( "Session timed out\n" ) }
-    else                        { return $result->content }
+    my $result = $self->handle->read_until( qr/\(fcsh\) /, 30 );
 
-    $self->close_session;
+    if      ( $result->closed )     { $self->log( "Session closed\n" ) }
+    elsif   ( $result->expired )    { $self->log( "Session timed out\n" ) }
+    else                            { return $result->content }
+
+    $self->close_handle;
 
     return undef;
 }
 
-my %compile;
 sub fcsh {
     my $self = shift;
     my $input = shift;
@@ -43,32 +55,66 @@ sub fcsh {
     chomp $input;
 
     my $output = '';
+    $output .= $self->read_until_prompt || '' if $self->fresh;
 
-    unless( $self->has_session ) {
-        $output .= $self->read_until_prompt || '';
-    }
-
+    my $compiles = $self->_compiles;
     my $compile;
     if ( $input =~ m/^\s*(?:mxmlc)\s+(.*)/ ) {
-        if ( $compile{$input} ) {
-            $input = "compile $compile{$input}";
+        if ( $compiles->{$input} ) {
+            $input = "compile $compiles->{$input}";
         }
         else {
             $compile = 1;
         }
     }
 
-    $self->session->write( "$input\n" );
+    $self->write( "$input\n" );
     
     $output .= $self->read_until_prompt || '';
 
-    if ($compile) {
+    if ( $compile ) {
         if ( $output =~ m/Assigned (\d+) as the compile target id/ ) {
-            $compile{$input} = $1;
+            $compiles->{$input} = $1;
         }
     }
 
     return $output."\n";
+}
+
+package App::pfcsh::Daemon;
+
+use Any::Moose;
+use AnyEvent::Socket;
+use AnyEvent::Util qw/ fh_nonblocking /;
+use IPC::RunSession::Simple;
+use Path::Class;
+use IPC::Open3 qw/open3/;
+use JSON; my $json = JSON->new;
+
+has fcsh_path => qw/ is ro required 1 isa Str init_arg fcsh /;
+has port => qw/ is ro required 1 isa Int /;
+has _sessions => qw/ is ro isa HashRef required 1 /, default => sub { {} };
+
+sub session {
+    my $self = shift;
+    my $working_directory = shift;
+    return $self->_sessions->{$working_directory} ||= do {
+        App::pfcsh::Daemon::Session->new(
+            working_directory => $working_directory,
+            daemon => $self,
+        );
+    };
+}
+
+sub fcsh {
+    my $self = shift;
+    my $request = shift;
+
+    my $arguments = $request->{arguments};
+    my $working_directory = $request->{working_directory};
+    my $session = $self->session( $working_directory );
+
+    return $session->fcsh( "@$arguments" );
 }
 
 sub run {
@@ -81,23 +127,28 @@ sub run {
 
         fh_nonblocking $fh, 0;
 
-        sysread $fh, my $command, 10_000 or warn "Couldn't read: $!";
-        chomp $command;
+        sysread $fh, my $_request, 10_000 or warn "Couldn't read: $!";
+        chomp $_request;
+        my $request = $json->decode( $_request );
 
-        $self->log( time, " $command\n" );
+        $self->log( time, " $_request\n" );
+        my $command = $request->{command};
 
-        if ( $command =~ m/^\s*ping\s*$/i ) {
+        if      ( $command eq 'ping' ) {
             $fh->print( "Pong!\n" );
-            warn "Pong!";
+            $self->log( "Pong!" );
         }
-        elsif ( $command =~ m/^\s*quit\s*$/i ) {
+        elsif   ( $command eq 'quit' ) {
             $fh->print( "Shutting down\n" );
-            $self->close_session;
+            # TODO Close out session?
             exit 0;
         }
-        else {
-            my $output = $self->fcsh( $command );
+        elsif   ( $command eq 'fcsh' ) {
+            my $output = $self->fcsh( $request );
             $fh->print( $output );
+        }
+        else {
+            $fh->print( "Do not know how to handle command ($command)\n" );
         }
     };
 
