@@ -110,11 +110,22 @@ sub fcsh {
     my $self = shift;
     my $request = shift;
 
-    my $arguments = $request->{arguments};
+    my @arguments = @{ $request->{arguments} };
+    my $environment_arguments = $request->{environment_arguments};
     my $working_directory = $request->{working_directory};
     my $session = $self->session( $working_directory );
 
-    return $session->fcsh( "@$arguments" );
+    my $_fcsh;
+    if ( defined $environment_arguments && length $environment_arguments ) {
+        my $first_argument = shift @arguments;
+        $_fcsh = "$first_argument $environment_arguments @arguments";
+    }
+    else {
+        $_fcsh = "@arguments";
+    }
+
+    $self->log( "fcsh: $_fcsh" );
+    return $session->fcsh( $_fcsh );
 }
 
 sub run {

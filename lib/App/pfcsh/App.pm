@@ -108,6 +108,7 @@ sub talk {
     my %request;
     $request{command} = $command;
     $request{arguments} = \@arguments;
+    $request{environment_arguments} = $ENV{PFCSH_ARGUMENTS};
     $request{working_directory} = cwd;
     $socket->print( $json->encode( \%request ) );
     print $_ while <$socket>;
