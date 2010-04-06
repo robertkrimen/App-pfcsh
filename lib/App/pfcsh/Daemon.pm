@@ -149,7 +149,7 @@ sub run {
             $fh->print( "Pong!\n" );
             $self->log( "Pong!" );
         }
-        elsif   ( $command eq 'quit' ) {
+        elsif   ( $command eq 'quit' || $command eq 'stop' ) {
             $fh->print( "Shutting down\n" );
             # TODO Close out session?
             exit 0;

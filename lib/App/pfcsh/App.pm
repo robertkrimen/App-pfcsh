@@ -55,8 +55,13 @@ sub _work_file {
     return $file.'';
 }
 
-has connection => qw/ is ro lazy_build 1 /;
+has connection => qw/ is ro lazy_build 1 clearer clear_connection /;
 sub _build_connection {
+    my $self = shift;
+    return $self->connect;
+}
+
+sub connect {
     my $self = shift;
     my $port = $self->port;
     return IO::Socket::INET->new( PeerAddr => "127.0.0.1:$port", Proto => 'tcp' );
@@ -76,13 +81,19 @@ sub pid {
     return check_pidfile( $self->pid_file );
 }
 
+sub running {
+    my $self = shift;
+    return 1 if $self->pid || $self->connect;
+    return 0;
+}
+
 sub try_startup {
     my $self = shift;
 
     my $pid_file = $self->pid_file;
     my $log_file = $self->log_file;
 
-    unless ( $self->pid ) {
+    unless ( $self->running ) {
 
         print "Attempting to launch server\n";
 
@@ -119,7 +130,9 @@ sub run {
 
     my $self = $class->new( port => PORT );
     
-    if( my $pid = $self->pid ) {
+    if( $self->running ) {
+        my $pid = $self->pid;
+        $pid ||= 0;
         print "Server running ($pid)\n";
     }
     else {
@@ -128,14 +141,20 @@ sub run {
 
     return unless @ARGV;
 
-    if ( $ARGV[0] =~ m/^\s*(?:start|quit)$/ ) {
-        if( my $pid = $self->pid ) {
-            print "Shutdown $pid\n";
-            kill 15, $pid;
+    my $pid = $self->pid;
+    if ( $ARGV[0] =~ m/^\s*(?:stop|quit)$/ ) {
+        if( $self->running ) {
+            if ( $pid ) {
+                print "Shutdown $pid\n";
+                kill 15, $pid;
+            }
+            else {
+                $self->talk( stop => '' );
+            }
         }
     }
-    elsif ( $ARGV[0] =~ m/^\s*(?:stop|quit)$/ ) {
-        if ( my $pid = $self->pid ) {
+    elsif ( $ARGV[0] =~ m/^\s*(?:start)$/ ) {
+        if ( $self->running ) {
             print "Server already running ($pid)\n";
         }
         else {
