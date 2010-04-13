@@ -1,86 +1,3 @@
-package App::pfcsh::Daemon::Session;
-
-use Any::Moose;
-
-use Try::Tiny;
-use Cwd qw/cwd/;
-
-has daemon => qw/ is ro required 1 /, handles => [qw/ log /];
-has working_directory => qw/ is ro required 1 isa Str /;
-has fresh => qw/ is rw isa Bool /, default => 1;
-has _compiles => qw/ is ro isa HashRef required 1 /, default => sub { {} };
-
-has handle => qw/ is ro lazy_build 1 clearer close_handle predicate has_handle /, handles => [qw/ write /];
-sub _build_handle {
-    my $self = shift;
-
-    my $fcsh = $self->daemon->fcsh_path;
-    my $working_directory = $self->working_directory;
-    
-    $self->log( "Opening fcsh session via \"$fcsh\" in \"$working_directory\"\n" );
-
-    my $cwd = cwd;
-    my $handle = try {
-        chdir $working_directory;
-        IPC::RunSession::Simple->open( $fcsh );
-    } finally {
-        chdir $cwd;
-    };
-
-    $self->fresh( 1 );
-
-    return $handle;
-}
-
-sub read_until_prompt {
-    my $self = shift;
-
-    $self->fresh( 0 );
-
-    my $result = $self->handle->read_until( qr/\(fcsh\) /, 30 );
-
-    if      ( $result->closed )     { $self->log( "Session closed\n" ) }
-    elsif   ( $result->expired )    { $self->log( "Session timed out\n" ) }
-    else                            { return $result->content }
-
-    $self->close_handle;
-
-    return undef;
-}
-
-sub fcsh {
-    my $self = shift;
-    my $input = shift;
-
-    chomp $input;
-
-    my $output = '';
-    $output .= $self->read_until_prompt || '' if $self->fresh;
-
-    my $compiles = $self->_compiles;
-    my $compile;
-    if ( $input =~ m/^\s*(?:mxmlc)\s+(.*)/ ) {
-        if ( $compiles->{$input} ) {
-            $input = "compile $compiles->{$input}";
-        }
-        else {
-            $compile = 1;
-        }
-    }
-
-    $self->write( "$input\n" );
-    
-    $output .= $self->read_until_prompt || '';
-
-    if ( $compile ) {
-        if ( $output =~ m/Assigned (\d+) as the compile target id/ ) {
-            $compiles->{$input} = $1;
-        }
-    }
-
-    return $output."\n";
-}
-
 package App::pfcsh::Daemon;
 
 use Any::Moose;
@@ -169,6 +86,96 @@ sub run {
 sub log {
     my $self = shift;
     warn "@_";
+}
+
+package App::pfcsh::Daemon::Session;
+
+use Any::Moose;
+
+use Try::Tiny;
+use Cwd qw/cwd/;
+
+has daemon => qw/ is ro required 1 /, handles => [qw/ log /];
+has working_directory => qw/ is ro required 1 isa Str /;
+has fresh => qw/ is rw isa Bool /, default => 1;
+has _compiles => qw/ is ro isa HashRef required 1 /, default => sub { {} };
+has last_access => qw/ is rw isa Int /, default => 0;
+
+has handle => qw/ is ro lazy_build 1 clearer close_handle predicate has_handle /, handles => [qw/ write /];
+sub _build_handle {
+    my $self = shift;
+
+    my $fcsh = $self->daemon->fcsh_path;
+    my $working_directory = $self->working_directory;
+    
+    $self->log( "Opening fcsh session via \"$fcsh\" in \"$working_directory\"\n" );
+
+    my $cwd = cwd;
+    my $handle = try {
+        chdir $working_directory;
+        IPC::RunSession::Simple->open( $fcsh );
+    } finally {
+        chdir $cwd;
+    };
+
+    $self->last_access( time );
+    $self->fresh( 1 );
+
+    return $handle;
+}
+
+sub read_until_prompt {
+    my $self = shift;
+
+    $self->fresh( 0 );
+
+    my $result = $self->handle->read_until( qr/\(fcsh\) /, 30 );
+
+    if      ( $result->closed )     { $self->log( "Session closed\n" ) }
+    elsif   ( $result->expired )    { $self->log( "Session timed out\n" ) }
+    else                            { return $result->content }
+
+    $self->close_handle;
+
+    return undef;
+}
+
+sub fcsh {
+    my $self = shift;
+    my $input = shift;
+
+    chomp $input;
+
+    my $output = '';
+
+    if ( $self->last_access && ( ( $self->last_access - time ) > 60 * 60 ) ) {
+        $self->close_handle;
+    }
+
+    $output .= $self->read_until_prompt || '' if $self->fresh;
+
+    my $compiles = $self->_compiles;
+    my $compile;
+    if ( $input =~ m/^\s*(?:mxmlc)\s+(.*)/ ) {
+        if ( $compiles->{$input} ) {
+            $input = "compile $compiles->{$input}";
+        }
+        else {
+            $compile = 1;
+        }
+    }
+
+    $self->write( "$input\n" );
+    
+    $output .= $self->read_until_prompt || '';
+
+    if ( $compile ) {
+        if ( $output =~ m/Assigned (\d+) as the compile target id/ ) {
+            $compiles->{$input} = $1;
+        }
+    }
+
+    return $output."\n";
 }
 
 1;
