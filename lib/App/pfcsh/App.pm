@@ -34,7 +34,7 @@ sub _build_log_file {
 }
 has work_path => qw/ is ro lazy_build 1 isa Str /;
 sub _build_work_path {
-    return './pfcsh.';
+    return "$ENV{HOME}/.pfcsh/";
 }
 
 sub _work_file {
@@ -87,6 +87,13 @@ sub running {
     return 0;
 }
 
+sub _make_parent ($) {
+    my $file = file( shift );
+    my $parent = $file->parent;
+    return if -e $parent;
+    $parent->mkpath;
+}
+
 sub try_startup {
     my $self = shift;
 
@@ -96,6 +103,9 @@ sub try_startup {
     unless ( $self->running ) {
 
         print "Attempting to launch server\n";
+
+        _make_parent $pid_file;
+        _make_parent $log_file;
 
         # This should really go into App::pfcsh::Daemon
 
