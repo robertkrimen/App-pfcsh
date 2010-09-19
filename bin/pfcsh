@@ -3,5 +3,5 @@
 use strict;
 use warnings;
 
-use App::pfcsh::App;
-App::pfcsh::App->run;
+use App::pfcsh;
+App::pfcsh->run( @ARGV );
