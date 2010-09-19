@@ -10,18 +10,19 @@ use Cwd qw/ cwd /;
 use JSON;
 use Try::Tiny;
 
+my $pool;
+
 sub run {
     my $self = shift;
     my @arguments = @_;
 
-    my $pool = App::pfcsh::SessionPool->new;
+    $pool = App::pfcsh::SessionPool->new;
 
     my $platform = Net::ClientServer->new(
         name => 'pfcsh',
         home => 1,
         port => 5130,
         daemon => 1,
-        fork => 1,
         start => sub {
             $0 = 'pfcsh',
         },
@@ -36,42 +37,20 @@ sub run {
                 push @json, "$_\n";
             }
             my $json = join '', @json;
-            Net::ClientServer->stdin2socket( $client );
-            Net::ClientServer->stdout2socket( $client );
-            Net::ClientServer->stderr2socket( $client );
-            #open stderr, ">&stdout" or die "can't redirect stderr to stdout: $!";
+            # This seems to break Open3 or something
+#            Net::ClientServer->stdin2socket( $client );
+#            Net::ClientServer->stdout2socket( $client );
 
-            my $data =  
+            my $request =  
                 try { JSON->new->decode( $json ) }
-                catch { die "unable to decode json: $_:\n$json" };
+                catch { die "Unable to decode JSON: $_:\n$json" };
 
-            print "> $json\n";
+            $self->request( $client, $request );
 
             $client->close;
         },
     );
 
-#sub fcsh {
-#    my $self = shift;
-#    my $request = shift;
-
-#    my @arguments = @{ $request->{arguments} };
-#    my $environment_arguments = $request->{environment_arguments};
-#    my $working_directory = $request->{working_directory};
-#    my $session = $self->session( $working_directory );
-
-#    my $_fcsh;
-#    if ( defined $environment_arguments && length $environment_arguments ) {
-#        my $first_argument = shift @arguments;
-#        $_fcsh = "$first_argument $environment_arguments @arguments";
-#    }
-#    else {
-#        $_fcsh = "@arguments";
-#    }
-
-#    $self->log( "fcsh: $_fcsh" );
-#    return $session->fcsh( $_fcsh );
-#}
     my $restart = $arguments[0] eq 'restart';
 
     if ( $restart ) {
@@ -90,6 +69,7 @@ sub run {
     }
     print "> Connected via $socket (", $platform->pid, ")\n";
 
+    my $request;
     my $done = AnyEvent->condvar;
     my $ae;
     $ae = AnyEvent::Handle->new(
@@ -103,7 +83,7 @@ sub run {
             my $hdl = shift;
             $hdl->push_read( line => sub {
                 my ( undef, $line ) = @_;
-                print $line, "\n";
+                print "$line\n";
             } );
         },
     );
@@ -119,6 +99,17 @@ sub run {
     $done->recv;
 }
 
+sub request {
+    my $self = shift;
+    my $client = shift;
+    my $request = shift;
+
+    my ( $arguments, $directory ) = @$request{qw/ arguments directory /};
+
+    my $session = $pool->session( $directory );
+    $client->print( $session->fcsh( $arguments ) );
+}
+
 package App::pfcsh::SessionPool;
 
 use Any::Moose;
@@ -128,11 +119,12 @@ has pool => qw/ is ro isa HashRef required 1 /, default => sub { {} };
 sub session {
     my $self = shift;
     my $working_directory = shift;
-    return $self->pool->{$working_directory} ||= do {
+    my $session = $self->pool->{$working_directory} ||= do {
         App::pfcsh::Session->new(
             working_directory => $working_directory,
         );
     };
+    return $session;
 }
 
 package App::pfcsh::Session;
@@ -141,6 +133,7 @@ use Any::Moose;
 
 use Try::Tiny;
 use Cwd qw/cwd/;
+use IPC::RunSession::Simple;
 
 has working_directory => qw/ is ro required 1 isa Str /;
 has fresh => qw/ is rw isa Bool /, default => 1;
@@ -158,7 +151,9 @@ has handle => qw/ is ro lazy_build 1 clearer close_handle predicate has_handle /
 sub _build_handle {
     my $self = shift;
 
-    my $fcsh = $self->daemon->fcsh_path;
+    my $fcsh = $ENV{PFCSH_FCSH} or die "\$ENV{PFCSH_FCSH} is missing";
+    $self->log( $fcsh );
+
     my $working_directory = $self->working_directory;
     
     $self->log( "Opening fcsh session via \"$fcsh\" in \"$working_directory\"\n" );
@@ -166,7 +161,8 @@ sub _build_handle {
     my $cwd = cwd;
     my $handle = try {
         chdir $working_directory;
-        IPC::RunSession::Simple->open( $fcsh );
+        my $handle = IPC::RunSession::Simple->open( $fcsh );
+        $handle;
     } finally {
         chdir $cwd;
     };
